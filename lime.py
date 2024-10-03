@@ -3,7 +3,7 @@ import numpy as np
 from numpy.random import binomial, seed
 from numpy.typing import NDArray
 
-from skimage.io import imread, imshow, imsave
+from skimage.io import imread, imsave
 from skimage.segmentation import quickshift
 
 from torch import argmax
@@ -14,6 +14,8 @@ from torchvision.models import vgg16, VGG16_Weights
 
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import pairwise_distances
+
+from PIL import Image
 
 from tqdm import tqdm
 
@@ -138,7 +140,7 @@ def main():
         args.num_selected_coefs
     )
 
-    imshow(lime_image)
+    Image.fromarray(lime_image).show()
 
     if args.save_image:
         imsave("lime.png", lime_image)
