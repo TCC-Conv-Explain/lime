@@ -4,22 +4,19 @@ from numpy.random import binomial, seed
 from numpy.typing import NDArray
 
 from skimage.io import imread, imshow, imsave
-from skimage.transform import resize
-from skimage.segmentation import quickshift, mark_boundaries
+from skimage.segmentation import quickshift
 
 from torch import topk, argmax
 from torch import Tensor
 from torch.nn import Module
 
 from torchvision.models import vgg16, VGG16_Weights
-from torchvision.transforms import ToTensor, ToPILImage
 
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import pairwise_distances
 
 from tqdm import tqdm
 
-import os
 import argparse
 
 from utils import *
