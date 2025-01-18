@@ -15,7 +15,7 @@ def read_image(image_path: str, size: tuple[int]=None):
     
     return image
 
-def numpy_to_torch(image: NDArray) -> Tensor:
+def numpy_to_torch(image: NDArray, device="cpu") -> Tensor:
     to_tensor = ToTensor()
-    tensor_image = to_tensor(image.astype(float32))
+    tensor_image = to_tensor(image.astype(float32)).to(device)
     return tensor_image.unsqueeze(0)

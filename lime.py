@@ -6,6 +6,7 @@ from numpy.typing import NDArray
 from skimage.io import imread, imsave
 from skimage.segmentation import quickshift
 
+import torch
 from torch import argmax
 from torch import Tensor
 from torch.nn import Module
@@ -23,6 +24,8 @@ import argparse
 
 from utils import *
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
 def gen_image_superpixels(image: NDArray, kernel_size: int, max_dist: int, ratio: float) -> NDArray:
     return quickshift(image, kernel_size=kernel_size, max_dist=max_dist, ratio=ratio)
 
@@ -39,9 +42,10 @@ def gen_masked_image(image: NDArray, superpixels_sample: NDArray, image_superpix
     mask = np.isin(image_superpixels, sample_indexes)
     return image * mask[..., None]  # clever way to multiply (W, H, C) * (W, H)  :D
 
+@torch.no_grad()
 def gen_model_preds(model: Module, image: NDArray, superpixels_sample: NDArray, image_superpixels: NDArray) -> Tensor:
     masked_image = gen_masked_image(image, superpixels_sample, image_superpixels)
-    tensor_image = numpy_to_torch(masked_image)
+    tensor_image = numpy_to_torch(masked_image, device=DEVICE)
     return model(tensor_image)
 
 def find_class_to_explain(model: Module, image: NDArray, image_superpixels: NDArray) -> Tensor:
@@ -75,7 +79,7 @@ def train_linear_model(
     outs = []
     for sample in tqdm(superpixels_sample):
         pred = gen_model_preds(model, image, sample, image_superpixels)
-        outs.append(pred[0][class_to_explain].detach())
+        outs.append(pred[0][class_to_explain].detach().cpu())
 
     linear_model = LinearRegression()
     linear_model.fit(X=superpixels_sample, y=outs, sample_weight=get_sample_weights(superpixels_sample, distance_kernel))
@@ -96,7 +100,7 @@ def lime(
 
     image = imread(path)
     image_superpixels = gen_image_superpixels(image, quickshift_kernel, quickshift_max_dist, quickshift_ratio)
-    model = vgg16(weights=VGG16_Weights.DEFAULT)
+    model = vgg16(weights=VGG16_Weights.DEFAULT).to(DEVICE)
     
     coefs = train_linear_model(image, model, image_superpixels, seed, sampling_prob, sampling_num, distance_kernel)
     
