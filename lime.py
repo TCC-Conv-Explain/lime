@@ -18,7 +18,12 @@ from tqdm import tqdm
 
 import argparse
 
+from utils import read_imagenet_classes
+
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+IMAGENET_CLASSES_PATH = "imagenet-simple-labels.json"
+INDEX_TO_CLASS = read_imagenet_classes(IMAGENET_CLASSES_PATH)
 
 class Quickshifter:
     def __init__(
@@ -158,6 +163,7 @@ class Lime:
     def train(self, image):
         self.superpixel_sampler.compute(image)
         explained_class = self._compute_explained_class(image)
+        print("Explained class found: ", INDEX_TO_CLASS[explained_class])
         print("Computing model predictions")
         if self.minibatch_size is None:
             preds = self._compute_model_preds(self.superpixel_sampler.image_sample, explained_class)
