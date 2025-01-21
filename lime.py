@@ -111,12 +111,14 @@ class Lime:
         superpixel_sampler: SuperpixelSampler,
         model: Module,
         sample_weights_calculator: SampleWeightsCalculator,
+        minibatch_size: int
     ):
         self.model = model
         self.model.eval()
         self.superpixel_sampler = superpixel_sampler
         self.sample_weights_calculator = sample_weights_calculator
         self.linear_model = LinearRegression()
+        self.minibatch_size = minibatch_size
     
     @torch.no_grad()
     def _find_explained_class(self, image: Tensor):
@@ -135,11 +137,32 @@ class Lime:
         
         return self.model(batch_image.to(DEVICE))[:, explained_class]
 
+    @torch.no_grad()
+    def _compute_model_preds_minibatched(self, batch_image: Tensor, explained_class: int):
+        assert len(batch_image.size()) == 4
+        self.model.eval()
+        batch_size = batch_image.size(0)
+        results = []
+        
+        low_minibatch_limit = 0
+        print("Computing Minibatch")
+        while low_minibatch_limit < batch_size:
+            next_minibatch_limit = min(low_minibatch_limit + self.minibatch_size, batch_size)
+
+            pred = self.model(batch_image[low_minibatch_limit:next_minibatch_limit].to(DEVICE))[:, explained_class]
+            
+            results.append(pred)
+            low_minibatch_limit = next_minibatch_limit
+        
+        return torch.cat(results)
     def train(self, image):
         self.superpixel_sampler.compute(image)
         explained_class = self._compute_explained_class(image)
         print("Computing model predictions")
-        preds = self._compute_model_preds(self.superpixel_sampler.image_sample, explained_class)
+        if self.minibatch_size is None:
+            preds = self._compute_model_preds(self.superpixel_sampler.image_sample, explained_class)
+        else:
+            preds = self._compute_model_preds_minibatched(self.superpixel_sampler.image_sample, explained_class)
         sample_weights = self.sample_weights_calculator.compute(self.superpixel_sampler.sample)
         
         print("Training Linear model")
@@ -161,7 +184,7 @@ def main(args):
 
     superpixel_sampler = SuperpixelSampler(quickshifter, args.sampling_prob, args.sampling_num, args.seed)
     sample_weights_calculator = SampleWeightsCalculator(args.distance_kernel)
-    lime = Lime(superpixel_sampler, model, sample_weights_calculator)
+    lime = Lime(superpixel_sampler, model, sample_weights_calculator, args.minibatch_size)
 
     coefs = lime.train(image)
     top_features = np.argsort(coefs)[-args.num_selected_coefs:]
@@ -183,6 +206,8 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42, help="Random seed value")
     parser.add_argument("--sampling-prob", type=float, default=0.5, help="Superpixel's sampling probability")
     parser.add_argument("--sampling-num", type=int, default=250, help="Number of superpixel samples for linear model train")
+    parser.add_argument("--minibatch-size", type=int, help="[Optional] Size of minibatch")
+
     
     parser.add_argument("--quickshift-kernel", type=int, default=4, help="Quickshift kernel constant value")
     parser.add_argument("--quickshift-max-dist", type=int, default=80, help="Quickshift max distance value")
