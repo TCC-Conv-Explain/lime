@@ -166,7 +166,13 @@ def main(args):
     coefs = lime.train(image)
     top_features = np.argsort(coefs)[-args.num_selected_coefs:]
 
-    ToPILImage()(superpixel_sampler.image_from_superpixels(image, top_features)).show()
+    result_image = ToPILImage()(superpixel_sampler.image_from_superpixels(image, top_features))
+    
+    if args.save_image is not None:
+        result_image.save(args.save_image)
+        return
+    
+    result_image.show()
 
 
 if __name__ == "__main__":
