@@ -1,9 +1,5 @@
 import numpy as np
 
-from numpy.random import binomial, seed
-from numpy.typing import NDArray
-
-from skimage.io import imread, imsave
 from skimage.segmentation import quickshift
 
 import torch
@@ -12,106 +8,163 @@ from torch import Tensor
 from torch.nn import Module
 
 from torchvision.models import vgg16, VGG16_Weights
+from torchvision.transforms import ToTensor, ToPILImage
 
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import pairwise_distances
 
 from PIL import Image
 
-from tqdm import tqdm
-
 import argparse
-
-from utils import *
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-def gen_image_superpixels(image: NDArray, kernel_size: int, max_dist: int, ratio: float) -> NDArray:
-    return quickshift(image, kernel_size=kernel_size, max_dist=max_dist, ratio=ratio)
-
-def get_superpixels_num(superpixels: NDArray) -> int:
-    return len(set(superpixels.flatten().tolist()))
-
-def gen_superpixels_sample(num_samples: int, num_superpixels: int, probability:float, random_seed: int = None) -> NDArray:
-    if random_seed is not None:
-        seed(random_seed)
-    return binomial(1, probability, (num_samples, num_superpixels))
-
-def gen_masked_image(image: NDArray, superpixels_sample: NDArray, image_superpixels: NDArray):
-    sample_indexes = np.where(superpixels_sample == 1)
-    mask = np.isin(image_superpixels, sample_indexes)
-    return image * mask[..., None]  # clever way to multiply (W, H, C) * (W, H)  :D
-
-@torch.no_grad()
-def gen_model_preds(model: Module, image: NDArray, superpixels_sample: NDArray, image_superpixels: NDArray) -> Tensor:
-    masked_image = gen_masked_image(image, superpixels_sample, image_superpixels)
-    tensor_image = numpy_to_torch(masked_image, device=DEVICE)
-    return model(tensor_image)
-
-def find_class_to_explain(model: Module, image: NDArray, image_superpixels: NDArray) -> Tensor:
-    superpixels_num = get_superpixels_num(image_superpixels)
-    pred = gen_model_preds(model, image, np.ones((superpixels_num, )), image_superpixels)
-    return argmax(pred)
-
-def get_sample_distances(superpixels_sample: NDArray) -> NDArray:
-    complete_sample = np.ones_like(superpixels_sample)[0]
-    complete_sample = np.expand_dims(complete_sample, axis=0)
-    return np.squeeze(pairwise_distances(superpixels_sample, complete_sample, metric='cosine'))
-
-def get_sample_weights(image_superpixels: NDArray, kernel_width: float=0.25) -> NDArray:
-    sample_distances = get_sample_distances(image_superpixels)
-    return np.sqrt(np.exp(- sample_distances**2 / kernel_width**2))
-
-def train_linear_model(
-    image: NDArray,
-    model: Module,
-    image_superpixels: NDArray,
-    seed: int,
-    sampling_prob: float,
-    sampling_num: int,
-    distance_kernel: float
+class Quickshifter:
+    def __init__(
+        self,
+        kernel,
+        max_dist,
+        ratio
     ):
-    superpixels_num = get_superpixels_num(image_superpixels)
-    class_to_explain = find_class_to_explain(model, image, image_superpixels)
+        self.kernel = kernel
+        self.max_dist = max_dist
+        self.ratio = ratio
 
-    superpixels_sample = gen_superpixels_sample(sampling_num, superpixels_num, sampling_prob, random_seed=seed)
-
-    outs = []
-    for sample in tqdm(superpixels_sample):
-        pred = gen_model_preds(model, image, sample, image_superpixels)
-        outs.append(pred[0][class_to_explain].detach().cpu())
-
-    linear_model = LinearRegression()
-    linear_model.fit(X=superpixels_sample, y=outs, sample_weight=get_sample_weights(superpixels_sample, distance_kernel))
+        self.superpixels = None
+        self.num_superpixels = None
     
-    return linear_model.coef_
+    def compute(self, image: Tensor):
+        if self.superpixels is not None:
+            return
+        
+        image = image.permute(1, 2, 0).numpy()
+        self.superpixels = torch.tensor(
+            quickshift(
+                image, 
+                kernel_size=self.kernel, 
+                max_dist=self.max_dist, 
+                ratio=self.ratio
+            )
+        )
+        self.num_superpixels = len(set(self.superpixels.flatten().tolist()))
 
-def lime(
-    path: str,
-    seed: int,
-    sampling_prob: float,
-    sampling_num: int,
-    quickshift_kernel: int,
-    quickshift_max_dist: int,
-    quickshift_ratio: float,
-    distance_kernel: float,
-    num_selected_coefs: int
-    ) -> NDArray:
+class SuperpixelSampler:
+    def __init__(
+        self,
+        quickshifter: Quickshifter,
+        probability: float,
+        num_samples: int,
+        seed: int
+    ):
+        self.quickshifter = quickshifter
+        self.probability = probability
+        self.num_samples = num_samples
+        self.seed = seed
 
-    image = imread(path)
-    image_superpixels = gen_image_superpixels(image, quickshift_kernel, quickshift_max_dist, quickshift_ratio)
+        self.sample = None
+        self.image_sample = None
+
+    def compute(self, image: Tensor):
+        if self.sample is not None:
+            return
+        
+        self.quickshifter.compute(image)
+
+        torch.manual_seed(self.seed)
+        probability_tensor = torch.full((self.num_samples, self.quickshifter.num_superpixels), self.probability)
+        self.sample = torch.bernoulli(probability_tensor).to(dtype=torch.int)
+        self.image_sample = self._image_batch_from_sample(image)
+    
+    def _image_batch_from_sample(self, image):
+        batch_size = self.sample.size(0)
+        
+        masks = []
+        for i in range(batch_size):
+            sample_indexes = torch.nonzero(self.sample[i] == 1, as_tuple=True)
+            mask = torch.isin(self.quickshifter.superpixels, torch.cat(sample_indexes))
+            masks.append(mask)
+        
+        masks = torch.stack(masks)  # Stack masks to match batch dimension
+
+        return image.unsqueeze(0) * masks.unsqueeze(1).expand(-1, 3, -1, -1)
+
+    def image_from_superpixels(self, image, superpixels_indices):
+        superpixels = self.quickshifter.superpixels
+
+        masked_superpixels = torch.isin(superpixels, torch.tensor(superpixels_indices)).float()
+        return image * masked_superpixels
+
+class SampleWeightsCalculator:
+    def __init__(self, kernel):
+        self.kernel = kernel
+        self.cosine_similarity = torch.nn.CosineSimilarity(dim=1)
+
+    def compute(self, superpixels):
+        distances = self.cosine_similarity(torch.ones_like(superpixels).float(), superpixels)
+        return torch.sqrt(torch.exp(- distances**2 / self.kernel**2))
+
+class Lime:
+    def __init__(
+        self,
+        superpixel_sampler: SuperpixelSampler,
+        model: Module,
+        sample_weights_calculator: SampleWeightsCalculator,
+    ):
+        self.model = model
+        self.model.eval()
+        self.superpixel_sampler = superpixel_sampler
+        self.sample_weights_calculator = sample_weights_calculator
+        self.linear_model = LinearRegression()
+    
+    @torch.no_grad()
+    def _find_explained_class(self, image: Tensor):
+        return argmax(self.model(image))
+
+    @torch.no_grad()
+    def _compute_explained_class(self, image: Tensor):
+        self.model.eval()
+
+        return torch.argmax(self.model(image.unsqueeze(0).to(DEVICE))[0]).item()
+
+    @torch.no_grad()
+    def _compute_model_preds(self, batch_image: Tensor, explained_class: int):
+        assert len(batch_image.size()) == 4
+        self.model.eval()
+        
+        return self.model(batch_image.to(DEVICE))[:, explained_class]
+
+    def train(self, image):
+        self.superpixel_sampler.compute(image)
+        explained_class = self._compute_explained_class(image)
+        preds = self._compute_model_preds(self.superpixel_sampler.image_sample, explained_class)
+        sample_weights = self.sample_weights_calculator.compute(self.superpixel_sampler.sample)
+        
+        self.linear_model.fit(
+            X=self.superpixel_sampler.sample.cpu(), 
+            y=preds.cpu(), 
+            sample_weight=sample_weights
+        )
+
+        return self.linear_model.coef_
+
+
+def main(args):
+    image = Image.open(args.path)
+    image = ToTensor()(image)
+
+    quickshifter = Quickshifter(args.quickshift_kernel, args.quickshift_max_dist, args.quickshift_ratio)
     model = vgg16(weights=VGG16_Weights.DEFAULT).to(DEVICE)
-    
-    coefs = train_linear_model(image, model, image_superpixels, seed, sampling_prob, sampling_num, distance_kernel)
-    
-    top_features = np.argsort(coefs)[-num_selected_coefs:]
 
-    mask = np.zeros(get_superpixels_num(image_superpixels))
-    mask[top_features] = 1
+    superpixel_sampler = SuperpixelSampler(quickshifter, args.sampling_prob, args.sampling_num, args.seed)
+    sample_weights_calculator = SampleWeightsCalculator(args.distance_kernel)
+    lime = Lime(superpixel_sampler, model, sample_weights_calculator)
 
-    return gen_masked_image(image, mask, image_superpixels)
+    coefs = lime.train(image)
+    top_features = np.argsort(coefs)[-args.num_selected_coefs:]
 
-def main():
+    ToPILImage()(superpixel_sampler.image_from_superpixels(image, top_features)).show()
+
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="DeepDream in PyTorch using VGG16")
 
     parser.add_argument("path", type=str, help="Path to image")
@@ -128,26 +181,7 @@ def main():
     
     parser.add_argument("--num-selected-coefs", type=int, default=5, help="Number of linear model coeficients used in LIME image")
 
-    parser.add_argument("--save-image", action='store_true', help="Save image")
+    parser.add_argument("--save-image", type=str, help="Saved image path")
     
     args = parser.parse_args()
-
-    lime_image = lime(
-        args.path, 
-        args.seed, 
-        args.sampling_prob, 
-        args.sampling_num,
-        args.quickshift_kernel,
-        args.quickshift_max_dist,
-        args.quickshift_ratio,
-        args.distance_kernel,
-        args.num_selected_coefs
-    )
-
-    Image.fromarray(lime_image).show()
-
-    if args.save_image:
-        imsave("lime.png", lime_image)
-
-if __name__ == "__main__":
-    main()
+    main(args)
