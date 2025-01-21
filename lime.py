@@ -14,6 +14,8 @@ from sklearn.linear_model import LinearRegression
 
 from PIL import Image
 
+from tqdm import tqdm
+
 import argparse
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -78,7 +80,8 @@ class SuperpixelSampler:
         batch_size = self.sample.size(0)
         
         masks = []
-        for i in range(batch_size):
+        print("Building image batch ...")
+        for i in tqdm(range(batch_size)):
             sample_indexes = torch.nonzero(self.sample[i] == 1, as_tuple=True)
             mask = torch.isin(self.quickshifter.superpixels, torch.cat(sample_indexes))
             masks.append(mask)
@@ -135,9 +138,11 @@ class Lime:
     def train(self, image):
         self.superpixel_sampler.compute(image)
         explained_class = self._compute_explained_class(image)
+        print("Computing model predictions")
         preds = self._compute_model_preds(self.superpixel_sampler.image_sample, explained_class)
         sample_weights = self.sample_weights_calculator.compute(self.superpixel_sampler.sample)
         
+        print("Training Linear model")
         self.linear_model.fit(
             X=self.superpixel_sampler.sample.cpu(), 
             y=preds.cpu(), 
