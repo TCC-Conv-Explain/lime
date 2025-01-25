@@ -1,6 +1,6 @@
 import numpy as np
 
-from skimage.segmentation import quickshift
+from skimage.segmentation import quickshift, mark_boundaries
 
 import torch
 from torch import argmax
@@ -53,6 +53,10 @@ class Quickshifter:
             )
         )
         self.num_superpixels = len(set(self.superpixels.flatten().tolist()))
+    
+    def show_superpixels(self, image):
+        # print(image.numpy().shape, self.superpixels.numpy().shape)
+        return torch.tensor(mark_boundaries(image.permute(1, 2, 0).numpy(), self.superpixels.numpy()))
 
 class SuperpixelSampler:
     def __init__(
@@ -186,6 +190,19 @@ def main(args):
     image = ToTensor()(image)
 
     quickshifter = Quickshifter(args.quickshift_kernel, args.quickshift_max_dist, args.quickshift_ratio)
+    
+    if args.show_segmentation:
+        quickshifter.compute(image)
+        segmentation_image = quickshifter.show_superpixels(image)
+        pil_segmentation_image = ToPILImage()(segmentation_image.permute(2, 0, 1))
+        
+        if args.save_image:
+            pil_segmentation_image.save(args.save_image)
+            return
+        
+        pil_segmentation_image.show()
+        return
+
     model = vgg16(weights=VGG16_Weights.DEFAULT).to(DEVICE)
 
     superpixel_sampler = SuperpixelSampler(quickshifter, args.sampling_prob, args.sampling_num, args.seed)
@@ -223,6 +240,7 @@ if __name__ == "__main__":
     
     parser.add_argument("--num-selected-coefs", type=int, default=5, help="Number of linear model coeficients used in LIME image")
 
+    parser.add_argument("--show-segmentation", action="store_true")
     parser.add_argument("--save-image", type=str, help="Saved image path")
     
     args = parser.parse_args()
